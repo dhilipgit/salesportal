@@ -1,0 +1,198 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Metadata: {}
+Parameters:
+  DynamoDBTableName:
+    Description: Name of the dynamoDB table to write data
+    Default: "sales-dynamodb-table"
+    Type: String
+    ConstraintDescription: must be a valid dynamoDB name.
+
+  BucketName:
+    Description: Name of the Bucket to Upload
+    Default: "sales-s3-bucket"
+    Type: String
+    ConstraintDescription: must be a Unique name.
+
+
+
+Resources:
+#Creates DynamoDb Table
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:
+        Ref: DynamoDBTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: uuid
+        AttributeType: S
+      KeySchema:
+      - AttributeName: uuid
+        KeyType: HASH
+      Tags:
+      - Key: Name
+        Value:
+          Ref: DynamoDBTableName
+
+  #Role For Lambda        
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        !Join [
+          "-",
+          [
+            "lambda",
+            "sales",
+            "s3",
+          ],
+        ]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+            - s3.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      - arn:aws:iam::aws:policy/AWSLambdaInvocation-DynamoDB
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+      - PolicyName: AllowDynamoDb
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Resource: "*"
+            Action:
+            - dynamodb:PutItem
+            - dynamodb:BatchWriteItem
+
+    
+
+#Lambda reads S3 write to DynamoDb
+  UploaderLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName:
+        !Join [
+          "-",
+          [
+            "s3",
+            "processer",
+            "lambda",
+          ],
+        ]
+      Handler: index.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - LambdaRole
+        - Arn
+      VpcConfig:
+        SecurityGroupIds:
+         - sg-0443be00a5675c0df
+        SubnetIds:
+         - subnet-0fe5e7b6d26061979
+         - subnet-074a6107007fb93eb
+       
+      Code: 
+        ZipFile: |
+          import boto3
+          import uuid
+          import datetime
+
+          from datetime import datetime
+
+          s3_client = boto3.client("s3")
+
+          dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+          table = dynamodb.Table('sales-dynamodb-table')
+
+          def check_date(sale_date):
+              try:
+                  res = bool(datetime.strptime(sale_date, "%d-%b-%y"))
+              except ValueError:
+                  res = False
+              return "Valid" if res == True else "Invalid"
+
+          def lambda_handler(event,context):
+              bucket_name = event['Records'][0]['s3']['bucket']['name']
+              s3_file_name = event['Records'][0]['s3']['object']['key']
+              resp = s3_client.get_object(Bucket=bucket_name,Key=s3_file_name)
+              data = resp['Body'].read().decode("utf-8")
+              sales = data.split("\n")
+              del sales[0]
+              for sale in sales:
+                  print(sale)
+                  sale_data = sale.split(",")
+                  try:
+                      table.put_item(
+                      Item = {
+                          "uuid": str(uuid.uuid1()),
+                          "SaleDate" : sale_data[0],
+                          "Saleitem" : sale_data[1],
+                          "Country" : sale_data[2],
+                          "Quantity" : sale_data[3],
+                          "FileName": s3_file_name,
+                          "Status": check_date(sale_data[0])
+                          }
+                      )
+                  except Exception as e:
+                      print(e)
+
+      Runtime: python3.7
+      Timeout: 900
+      MemorySize: 3008
+
+#Create S3 bucker to upload
+  S3BucketUpload:
+    DependsOn:
+    - UploaderLambdaFunction
+    - BucketUploadPermission
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Ref: BucketName
+      AccessControl: BucketOwnerFullControl
+      AccelerateConfiguration:
+        AccelerationStatus: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: "AES256"
+      NotificationConfiguration:
+        LambdaConfigurations:
+        - Event: s3:ObjectCreated:*
+          Function:
+            Fn::GetAtt:
+            - UploaderLambdaFunction
+            - Arn
+
+  # Allow S3 to invoke Lambda
+
+  BucketUploadPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: UploaderLambdaFunction
+      Principal: s3.amazonaws.com
+      SourceAccount:
+        Ref: AWS::AccountId
+    
+
+  #Create API gatway for S3    
+  SalesApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: Sales API
+      Description: API used for Sales Upload requests
+      FailOnWarnings: true
+
+Outputs: {}

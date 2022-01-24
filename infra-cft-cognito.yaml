@@ -1,0 +1,234 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "Login resource Cognito"
+
+
+
+Metadata: {}
+Parameters:
+  UserPoolName:
+    Type: String
+  UserPoolSNSRoleArn:
+    Type: String
+  UserPoolSNSRoleExternalId:
+    Type: String
+  PostAuthenticationLambdaArn:
+    Type: String
+  PostAuthenticationLambdaRoleName:
+    Type: String
+  env:
+    Type: String
+    Default: DEV
+    AllowedValues:
+    - "CAT"
+    - "DEV"
+    - "POC"
+    - "PRE-PROD"
+    - "PROD"
+    - "QA"
+    - "QA1"
+    - "QA2"
+    - "SIT"
+    - "STAGE"
+    - "TRAINING"
+    - "UAT"
+    Description: Environment (DEV,QA,UAT,PROD)    
+  region:
+    Type: String
+    Default: US
+    AllowedValues:
+      - "NAM"
+      - "APAC"
+      - "EMEA"
+      - "US"
+      - "LATAM"
+    Description: Tag - Sales Region
+  stack:
+    Default: ""
+    Type: String
+    Description: 'Tag - Stack'
+  customer:
+    Default: 'Sales'
+    Type: String
+    Description: Tag - Customer
+  costcenter:
+    Default: ""
+    Type: String
+    Description: Tag - Cost Center
+  application:
+    Default: ""
+    Type: String
+    Description: Tag - Application
+  
+Mappings:       
+  NamingEnvironment: 
+    "PROD": 
+      "Code": "prod"
+    "PRE-PROD": 
+      "Code": "preprod"
+    "UAT": 
+      "Code": "uat"
+    "QA":
+      "Code": "qa"
+    "QA1":
+      "Code": "qa1"
+    "QA2":
+      "Code": "qa2"
+    "TEST": 
+      "Code": "test"
+    "DEV": 
+      "Code": "dev"
+    "SIT": 
+      "Code": "sit"
+    "CAT": 
+      "Code": "cat"
+    "DR": 
+      "Code": "dr"
+      
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolName: 
+        Fn::Join:
+        - "-"
+        - - Ref: UserPoolName
+          - !FindInMap [NamingEnvironment, !Ref env, "Code"]  
+      UsernameAttributes:
+        - email
+      UsernameConfiguration:
+        CaseSensitive: false   
+      Schema:
+      - Name: email
+        Required: true
+        Mutable: true
+
+      
+      AutoVerifiedAttributes:
+      - email
+      EmailVerificationMessage: Your verification code is {####}
+      EmailVerificationSubject: Your verification code
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      AccountRecoverySetting:
+        RecoveryMechanisms: 
+          - Name: verified_email
+            Priority: 1  
+      UserPoolTags:
+        Environment: !Ref env
+        SalesRegion: !Ref region
+        Stack: !Ref stack
+        Customer: !Ref customer
+        Costcenter: !Ref costcenter
+        Application: !Ref application
+        
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: 
+        Fn::Join:
+        - "_"
+        - - !Ref UserPoolName
+          - "ClientApp"
+          - !FindInMap [NamingEnvironment, !Ref env, "Code"]  
+      GenerateSecret: False
+      UserPoolId: !Ref UserPool
+      ReadAttributes:
+        - email
+        - email_verified
+      WriteAttributes:
+        - email
+          
+  CognitoIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:  
+      IdentityPoolName: 
+        Fn::Join:
+        - "_"
+        - - !Ref UserPoolName 
+          - "IdentityPool"
+          - !FindInMap [NamingEnvironment, !Ref env, "Code"] 
+      AllowUnauthenticatedIdentities: False
+      CognitoIdentityProviders:
+        - ClientId: !Ref CognitoUserPoolClient
+          ProviderName: !GetAtt UserPool.ProviderName
+  cognitoUnauthRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub Cognito-${CognitoIdentityPool.Name}-Unauth-Role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: [ 'sts:AssumeRole' ]
+      Policies:
+        - PolicyName: cognitounauth
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                - mobileanalytics:PutEvents
+                - cognito-sync:*
+                Resource:
+                - "*"
+  cognitoAuthRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub Cognito-${CognitoIdentityPool.Name}-Auth-Role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: [ 'sts:AssumeRole' ]
+      Policies:
+        - PolicyName: cognitoauth
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                - mobileanalytics:PutEvents
+                - cognito-sync:*
+                - cognito-identity:*                
+                Resource:
+                - "*"
+        - PolicyName: allows3
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                - s3:*
+                Resource:
+                - "*"
+  IdentityPoolRoleAttachment:
+    DependsOn: [ CognitoIdentityPool, cognitoUnauthRole, cognitoAuthRole ]
+    Type: "AWS::Cognito::IdentityPoolRoleAttachment"
+    Properties:
+      IdentityPoolId: !Ref CognitoIdentityPool
+      Roles: 
+        authenticated: !GetAtt cognitoAuthRole.Arn
+        unauthenticated: !GetAtt cognitoUnauthRole.Arn
+
+Outputs:
+  UserPoolId:
+    Value:
+      Ref: UserPool
+  identityPool:
+    Description: "Identity pool ID"
+    Value: !Ref CognitoIdentityPool
+  ClientId: 
+    Description: "Client id for the user pool appclient"
+    Value: !Ref CognitoUserPoolClient
